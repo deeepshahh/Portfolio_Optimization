@@ -1,12 +1,4 @@
-import subprocess
-import sys
-
-# Check if yfinance is installed, if not, install it
-try:
-    import yfinance as yf
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "yfinance"])
-    import yfinance as yf
+import yfinance as yf
 import streamlit as st
 import pandas as pd
 import numpy as np
