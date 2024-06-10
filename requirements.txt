@@ -6,3 +6,4 @@ matplotlib
 seaborn
 plotly
 fpdf2
+scipy
