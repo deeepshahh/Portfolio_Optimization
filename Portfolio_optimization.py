@@ -7,6 +7,7 @@ import seaborn as sns
 import plotly.express as px
 from scipy.optimize import minimize
 from fpdf import FPDF
+from joblib import Parallel, delayed
 
 def calculate_var(returns, alpha=0.05):
     if len(returns) == 0:
@@ -21,32 +22,45 @@ def calculate_es(returns, alpha=0.05):
     es = returns[returns <= var].mean()
     return es
 
-def monte_carlo_simulation(mean_returns, cov_matrix, num_simulations):
-    np.random.seed(42)
-    num_assets = len(mean_returns)
-    results = np.zeros((3, num_simulations))
+def calculate_cvar(returns, alpha=0.05):
+    if len(returns) == 0:
+        return np.nan
+    var = calculate_var(returns, alpha)
+    cvar = np.mean([x for x in returns if x < var])
+    return cvar
 
-    for i in range(num_simulations):
+def calculate_max_drawdown(returns):
+    cumulative_returns = (1 + returns).cumprod()
+    peak = cumulative_returns.cummax()
+    drawdown = (cumulative_returns - peak) / peak
+    max_drawdown = drawdown.min()
+    return max_drawdown
+
+def monte_carlo_simulation(mean_returns, cov_matrix, num_simulations, num_assets):
+    np.random.seed(42)
+    results = np.zeros((4, num_simulations))
+
+    def simulate_once():
         weights = np.random.random(num_assets)
         weights /= np.sum(weights)
-
         portfolio_return = np.sum(mean_returns * weights)
         portfolio_stddev = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+        sharpe_ratio = (portfolio_return - 0.01) / portfolio_stddev
+        max_drawdown = calculate_max_drawdown(np.dot(data.pct_change(), weights))
+        return portfolio_return, portfolio_stddev, sharpe_ratio, max_drawdown
 
-        results[0, i] = portfolio_return
-        results[1, i] = portfolio_stddev
-        results[2, i] = (portfolio_return - 0.01) / portfolio_stddev  # Sharpe Ratio
+    results = Parallel(n_jobs=-1)(delayed(simulate_once)() for _ in range(num_simulations))
+    return np.array(results).T
 
-    return results
-
-def plot_efficient_frontier(mean_returns, cov_matrix):
-    results = monte_carlo_simulation(mean_returns, cov_matrix, 10000)
+def plot_efficient_frontier(mean_returns, cov_matrix, data):
+    num_assets = len(mean_returns)
+    results = monte_carlo_simulation(mean_returns, cov_matrix, 10000, num_assets)
     fig = px.scatter(x=results[1], y=results[0], color=results[2], 
                      labels={'x': 'Volatility', 'y': 'Return', 'color': 'Sharpe Ratio'},
                      title='Efficient Frontier')
     st.plotly_chart(fig)
 
-def create_pdf_report(tickers, optimized_weights, port_return, port_std, sharpe_ratio, var, es):
+def create_pdf_report(tickers, optimized_weights, port_return, port_std, sharpe_ratio, var, es, cvar, max_drawdown):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
@@ -61,6 +75,8 @@ def create_pdf_report(tickers, optimized_weights, port_return, port_std, sharpe_
     pdf.cell(200, 10, txt=f"Sharpe Ratio: {sharpe_ratio:.2f}", ln=True)
     pdf.cell(200, 10, txt=f"Value at Risk (VaR) at 95% confidence level: {var:.2%}", ln=True)
     pdf.cell(200, 10, txt=f"Expected Shortfall (ES) at 95% confidence level: {es:.2%}", ln=True)
+    pdf.cell(200, 10, txt=f"Conditional Value at Risk (CVaR) at 95% confidence level: {cvar:.2%}", ln=True)
+    pdf.cell(200, 10, txt=f"Maximum Drawdown: {max_drawdown:.2%}", ln=True)
     
     pdf_buffer = pdf.output(dest='S').encode('latin1')
     return pdf_buffer
@@ -76,11 +92,11 @@ def enforce_asset_class_constraints(weights, asset_classes, min_allocation, max_
         class_indices = [i for i, ac in enumerate(asset_classes) if ac == asset_class]
         constraints.append({
             'type': 'ineq',
-            'fun': lambda w: np.sum(w[class_indices]) - float(min_allocation),
+            'fun': lambda w, idx=class_indices, min_allocation=min_allocation: np.sum(w[idx]) - min_allocation,
         })
         constraints.append({
             'type': 'ineq',
-            'fun': lambda w: float(max_allocation) - np.sum(w[class_indices]),
+            'fun': lambda w, idx=class_indices, max_allocation=max_allocation: max_allocation - np.sum(w[idx]),
         })
 
     return constraints
@@ -127,8 +143,8 @@ def main():
     
     if apply_constraints:
         asset_classes = st.text_input("Enter asset classes separated by a comma (e.g., Tech,Tech,Tech,Tech,Tech):", "Tech,Tech,Tech,Tech,Tech").split(',')
-        min_allocation = list(map(float, st.text_input("Enter minimum allocation for each class separated by a comma:", "0.1, 0.1, 0.1").split(',')))
-        max_allocation = list(map(float, st.text_input("Enter maximum allocation for each class separated by a comma:", "0.5, 0.3, 0.2").split(',')))
+        min_allocation = float(st.text_input("Enter minimum allocation for each class:", "0.1"))
+        max_allocation = float(st.text_input("Enter maximum allocation for each class:", "0.5"))
         additional_constraints = enforce_asset_class_constraints(None, asset_classes, min_allocation, max_allocation)
     
     result = optimize_portfolio(mean_returns, cov_matrix, additional_constraints=additional_constraints)
@@ -175,11 +191,19 @@ def main():
     es = calculate_es(returns)
     st.write(f"Expected Shortfall (ES) at 95% confidence level: {es:.2%}")
     
+    # Conditional Value at Risk (CVaR)
+    cvar = calculate_cvar(returns)
+    st.write(f"Conditional Value at Risk (CVaR) at 95% confidence level: {cvar:.2%}")
+    
+    # Maximum Drawdown
+    max_drawdown = calculate_max_drawdown(returns)
+    st.write(f"Maximum Drawdown: {max_drawdown:.2%}")
+    
     # Monte Carlo simulation
     st.write("Monte Carlo Simulation:")
     num_simulations = st.number_input("Number of Simulations:", 1000, 100000, 10000)
-    simulation_results = monte_carlo_simulation(mean_returns, cov_matrix, num_simulations)
-    simulation_df = pd.DataFrame({'Return': simulation_results[0], 'Volatility': simulation_results[1], 'Sharpe Ratio': simulation_results[2]})
+    simulation_results = monte_carlo_simulation(mean_returns, cov_matrix, num_simulations, len(tickers))
+    simulation_df = pd.DataFrame({'Return': simulation_results[0], 'Volatility': simulation_results[1], 'Sharpe Ratio': simulation_results[2], 'Max Drawdown': simulation_results[3]})
     fig = px.scatter(simulation_df, x='Volatility', y='Return', color='Sharpe Ratio', title='Monte Carlo Simulation Results')
     st.plotly_chart(fig)
     
@@ -187,7 +211,7 @@ def main():
     st.write("Generate PDF Report:")
     generate_pdf = st.button("Generate PDF")
     if generate_pdf:
-        pdf_buffer = create_pdf_report(tickers, optimized_weights, port_return, port_std, sharpe_ratio, var, es)
+        pdf_buffer = create_pdf_report(tickers, optimized_weights, port_return, port_std, sharpe_ratio, var, es, cvar, max_drawdown)
         st.download_button("Download PDF", data=pdf_buffer, file_name="Portfolio_Optimization_Report.pdf", mime='application/pdf')
 
 if __name__ == "__main__":
