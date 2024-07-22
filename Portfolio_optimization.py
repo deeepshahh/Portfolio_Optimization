@@ -123,6 +123,7 @@ def main():
     if data.isnull().values.any():
         st.write("Data contains null values. Attempting to fill missing data.")
         data.fillna(method='ffill', inplace=True)  # Forward fill missing data
+        data.fillna(method='bfill', inplace=True)  # Backward fill missing data
         if data.isnull().values.any():
             st.write("Data still contains null values. Please check the ticker symbols and try again.")
             return
