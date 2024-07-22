@@ -142,6 +142,7 @@ def main():
         data = data.ffill().bfill()
         if data.isnull().values.any():
             st.write("Data still contains null values. Please check the ticker symbols and try again.")
+            st.write(data)
             return
     
     # Adjust data for each ticker based on its exchange rate
