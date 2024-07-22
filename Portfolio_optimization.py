@@ -8,28 +8,6 @@ import plotly.express as px
 from scipy.optimize import minimize
 from fpdf import FPDF
 
-# Exchange rate mapping based on stock suffix
-exchange_rate_mapping = {
-    'NS': 'USDINR=X',
-    'L': 'GBPUSD=X',
-    'TO': 'CADUSD=X',
-    'HK': 'HKDUSD=X',
-    # Add more mappings as needed
-}
-
-# Function to retrieve exchange rate data
-def get_exchange_rate(ticker_suffix):
-    if ticker_suffix not in exchange_rate_mapping:
-        return 1  # Assume 1 for USD stocks
-    try:
-        fx_ticker = exchange_rate_mapping[ticker_suffix]
-        fx_data = yf.download(fx_ticker, start="2020-01-01")
-        fx_data = fx_data['Adj Close'].ffill().bfill()
-        return fx_data
-    except Exception as e:
-        st.write("Error retrieving exchange rate data for", ticker_suffix, ":", e)
-        return None
-
 def calculate_var(returns, alpha=0.05):
     if len(returns) == 0:
         return np.nan
@@ -87,26 +65,6 @@ def create_pdf_report(tickers, optimized_weights, port_return, port_std, sharpe_
     pdf_buffer = pdf.output(dest='S').encode('latin1')
     return pdf_buffer
 
-def enforce_asset_class_constraints(weights, asset_classes, min_allocation, max_allocation):
-    if weights is None:
-        return []
-
-    constraints = []
-    unique_classes = np.unique(asset_classes)
-
-    for asset_class in unique_classes:
-        class_indices = [i for i, ac in enumerate(asset_classes) if ac == asset_class]
-        constraints.append({
-            'type': 'ineq',
-            'fun': lambda w: np.sum(w[class_indices]) - float(min_allocation),
-        })
-        constraints.append({
-            'type': 'ineq',
-            'fun': lambda w: float(max_allocation) - np.sum(w[class_indices]),
-        })
-
-    return constraints
-
 def optimize_portfolio(mean_returns, cov_matrix, additional_constraints=None):
     num_assets = len(mean_returns)
     args = (mean_returns, cov_matrix)
@@ -132,46 +90,26 @@ def optimize_portfolio(mean_returns, cov_matrix, additional_constraints=None):
     return result
 
 def main():
-    st.title("Portfolio Optimization Tool")
+    st.title("Portfolio Optimization Tool (Indian Stocks)")
 
-    tickers = st.text_input("Enter ticker symbols separated by commas (e.g., AAPL,MSFT,GOOGL,AMZN,HDFCBANK.NS):", "AAPL,MSFT,GOOGL,AMZN,HDFCBANK.NS").split(',')
-    data = yf.download(tickers, start="2020-01-01")['Adj Close']
-    
+    tickers = st.text_input("Enter ticker symbols separated by commas (e.g., HDFCBANK.NS,RELIANCE.NS,TCS.NS):", "HDFCBANK.NS,RELIANCE.NS,TCS.NS").split(',')
+    investment_amount = st.number_input("Enter the investment amount (in INR):", min_value=0.0, value=100000.0)
+    investment_date = st.date_input("Enter the investment date:", value=pd.to_datetime("2020-01-01"))
+
+    data = yf.download(tickers, start=investment_date)['Adj Close']
+
     if data.isnull().values.any():
         st.write("Data contains null values. Attempting to fill missing data.")
-        data = data.ffill().bfill()
-        if data.isnull().values.any():
-            st.write("Data still contains null values. Please check the ticker symbols and try again.")
-            st.write(data)
-            return
+        data = data.fillna(method='ffill').fillna(method='bfill')
     
-    # Adjust data for each ticker based on its exchange rate
-    for ticker in tickers:
-        suffix = ticker.split('.')[-1] if '.' in ticker else ''
-        if suffix:
-            exchange_rate = get_exchange_rate(suffix)
-            if exchange_rate is not None:
-                if len(exchange_rate) != len(data[ticker]):
-                    st.write(f"Exchange rate length mismatch for {ticker}. Adjusting...")
-                    exchange_rate = exchange_rate.reindex(data[ticker].index, method='ffill').ffill().bfill()
-                st.write(f"Adjusting {ticker} prices based on exchange rate.")
-                data[ticker] = data[ticker].div(exchange_rate, axis=0)
-            else:
-                st.write(f"Exchange rate for {ticker} not found. Skipping adjustment.")
-    
+    if data.isnull().values.any():
+        st.write("Data still contains null values. Please check the ticker symbols and try again.")
+        return
+
     mean_returns = data.pct_change().mean()
     cov_matrix = data.pct_change().cov()
-    
-    apply_constraints = st.checkbox("Apply asset class constraints?")
-    additional_constraints = None
-    
-    if apply_constraints:
-        asset_classes = st.text_input("Enter asset classes separated by a comma (e.g., Tech,Tech,Tech,Tech,Finance):", "Tech,Tech,Tech,Tech,Finance").split(',')
-        min_allocation = list(map(float, st.text_input("Enter minimum allocation for each class separated by a comma:", "0.1, 0.1, 0.1, 0.1, 0.1").split(',')))
-        max_allocation = list(map(float, st.text_input("Enter maximum allocation for each class separated by a comma:", "0.5, 0.5, 0.5, 0.5, 0.5").split(',')))
-        additional_constraints = enforce_asset_class_constraints(None, asset_classes, min_allocation, max_allocation)
-    
-    result = optimize_portfolio(mean_returns, cov_matrix, additional_constraints=additional_constraints)
+
+    result = optimize_portfolio(mean_returns, cov_matrix)
     
     if not result.success:
         st.write("Optimization failed. Please check your inputs and try again.")
@@ -189,50 +127,33 @@ def main():
     st.write(f"Annual Volatility (Standard Deviation): {port_std:.2%}")
     st.write(f"Sharpe Ratio: {sharpe_ratio:.2f}")
     
-    st.pyplot(plt.gcf())
+    st.write("Historical Adjusted Closing Prices:")
+    st.line_chart(data)
     
-    # Efficient Frontier plot
-    st.write("Efficient Frontier:")
-    plot_efficient_frontier(mean_returns, cov_matrix)
-    
-    # Plotting the adjusted stock prices
-    st.write("Adjusted Stock Prices:")
-    fig, ax = plt.subplots(figsize=(12, 8))
-    for column in data.columns:
-        ax.plot(data[column], label=column)
-    ax.legend()
-    st.pyplot(fig)
-    
-    # Pie chart of optimized weights
-    st.write("Portfolio Allocation:")
+    st.write("Portfolio Weights Distribution:")
     fig, ax = plt.subplots()
     ax.pie(optimized_weights, labels=tickers, autopct='%1.1f%%', startangle=90)
     ax.axis('equal')
     st.pyplot(fig)
     
-    # Value at Risk (VaR)
-    returns = data.pct_change().dropna().dot(optimized_weights)
-    var = calculate_var(returns)
-    st.write(f"Value at Risk (VaR) at 95% confidence level: {var:.2%}")
+    # Covariance matrix heatmap
+    st.write("Covariance Matrix:")
+    plt.figure(figsize=(10, 7))
+    sns.heatmap(cov_matrix, annot=True, cmap='coolwarm', xticklabels=tickers, yticklabels=tickers)
+    st.pyplot(plt)
     
-    # Expected Shortfall (ES)
-    es = calculate_es(returns)
-    st.write(f"Expected Shortfall (ES) at 95% confidence level: {es:.2%}")
+    plot_efficient_frontier(mean_returns, cov_matrix)
     
-    # Monte Carlo simulation
-    st.write("Monte Carlo Simulation:")
-    num_simulations = st.number_input("Number of Simulations:", 1000, 100000, 10000)
-    simulation_results = monte_carlo_simulation(mean_returns, cov_matrix, num_simulations)
-    simulation_df = pd.DataFrame({'Return': simulation_results[0], 'Volatility': simulation_results[1], 'Sharpe Ratio': simulation_results[2]})
-    fig = px.scatter(simulation_df, x='Volatility', y='Return', color='Sharpe Ratio', title='Monte Carlo Simulation Results')
-    st.plotly_chart(fig)
+    # Calculate VaR and ES for the optimized portfolio
+    portfolio_returns = data.pct_change().dot(optimized_weights)
+    var_95 = calculate_var(portfolio_returns, alpha=0.05)
+    es_95 = calculate_es(portfolio_returns, alpha=0.05)
+    st.write(f"Value at Risk (VaR) at 95% confidence level: {var_95:.2%}")
+    st.write(f"Expected Shortfall (ES) at 95% confidence level: {es_95:.2%}")
     
-    # PDF report generation
-    st.write("Generate PDF Report:")
-    generate_pdf = st.button("Generate PDF")
-    if generate_pdf:
-        pdf_buffer = create_pdf_report(tickers, optimized_weights, port_return, port_std, sharpe_ratio, var, es)
-        st.download_button("Download PDF", data=pdf_buffer, file_name="Portfolio_Optimization_Report.pdf", mime='application/pdf')
+    # Create PDF report
+    pdf_buffer = create_pdf_report(tickers, optimized_weights, port_return, port_std, sharpe_ratio, var_95, es_95)
+    st.download_button(label="Download Report", data=pdf_buffer, file_name="Portfolio_Optimization_Report.pdf", mime="application/pdf")
 
 if __name__ == "__main__":
     main()
