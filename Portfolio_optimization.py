@@ -7,6 +7,7 @@ import seaborn as sns
 import plotly.express as px
 from scipy.optimize import minimize
 from fpdf import FPDF
+from joblib import Parallel, delayed
 
 def calculate_var(returns, alpha=0.05):
     if len(returns) == 0:
@@ -21,32 +22,32 @@ def calculate_es(returns, alpha=0.05):
     es = returns[returns <= var].mean()
     return es
 
-def monte_carlo_simulation(mean_returns, cov_matrix, num_simulations):
+def monte_carlo_simulation(mean_returns, cov_matrix, num_simulations, num_assets):
     np.random.seed(42)
-    num_assets = len(mean_returns)
-    results = np.zeros((3, num_simulations))
+    results = np.zeros((4, num_simulations))
 
-    for i in range(num_simulations):
+    def simulate():
         weights = np.random.random(num_assets)
         weights /= np.sum(weights)
 
         portfolio_return = np.sum(mean_returns * weights)
         portfolio_stddev = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+        max_drawdown = np.max(np.maximum.accumulate(mean_returns) - mean_returns)
 
-        results[0, i] = portfolio_return
-        results[1, i] = portfolio_stddev
-        results[2, i] = (portfolio_return - 0.01) / portfolio_stddev  # Sharpe Ratio
+        return [portfolio_return, portfolio_stddev, (portfolio_return - 0.01) / portfolio_stddev, max_drawdown]
 
-    return results
+    results = Parallel(n_jobs=-1)(delayed(simulate)() for _ in range(num_simulations))
+
+    return np.array(results).T
 
 def plot_efficient_frontier(mean_returns, cov_matrix):
-    results = monte_carlo_simulation(mean_returns, cov_matrix, 10000)
+    results = monte_carlo_simulation(mean_returns, cov_matrix, 10000, len(mean_returns))
     fig = px.scatter(x=results[1], y=results[0], color=results[2], 
                      labels={'x': 'Volatility', 'y': 'Return', 'color': 'Sharpe Ratio'},
                      title='Efficient Frontier')
     st.plotly_chart(fig)
 
-def create_pdf_report(tickers, optimized_weights, port_return, port_std, sharpe_ratio, var, es):
+def create_pdf_report(tickers, optimized_weights, port_return, port_std, sharpe_ratio, var, es, cvar, max_drawdown):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
@@ -61,6 +62,8 @@ def create_pdf_report(tickers, optimized_weights, port_return, port_std, sharpe_
     pdf.cell(200, 10, txt=f"Sharpe Ratio: {sharpe_ratio:.2f}", ln=True)
     pdf.cell(200, 10, txt=f"Value at Risk (VaR) at 95% confidence level: {var:.2%}", ln=True)
     pdf.cell(200, 10, txt=f"Expected Shortfall (ES) at 95% confidence level: {es:.2%}", ln=True)
+    pdf.cell(200, 10, txt=f"Conditional Value at Risk (CVaR) at 95% confidence level: {cvar:.2%}", ln=True)
+    pdf.cell(200, 10, txt=f"Maximum Drawdown: {max_drawdown:.2%}", ln=True)
     
     pdf_buffer = pdf.output(dest='S').encode('latin1')
     return pdf_buffer
@@ -116,8 +119,11 @@ def main():
     data = yf.download(tickers, start="2020-01-01")['Adj Close']
     
     if data.isnull().values.any():
-        st.write("Data contains null values. Please check the ticker symbols and try again.")
-        return
+        st.write("Data contains null values. Attempting to fill missing data.")
+        data.fillna(method='ffill', inplace=True)  # Forward fill missing data
+        if data.isnull().values.any():
+            st.write("Data still contains null values. Please check the ticker symbols and try again.")
+            return
     
     mean_returns = data.pct_change().mean()
     cov_matrix = data.pct_change().cov()
@@ -178,8 +184,8 @@ def main():
     # Monte Carlo simulation
     st.write("Monte Carlo Simulation:")
     num_simulations = st.number_input("Number of Simulations:", 1000, 100000, 10000)
-    simulation_results = monte_carlo_simulation(mean_returns, cov_matrix, num_simulations)
-    simulation_df = pd.DataFrame({'Return': simulation_results[0], 'Volatility': simulation_results[1], 'Sharpe Ratio': simulation_results[2]})
+    simulation_results = monte_carlo_simulation(mean_returns, cov_matrix, num_simulations, len(tickers))
+    simulation_df = pd.DataFrame({'Return': simulation_results[0], 'Volatility': simulation_results[1], 'Sharpe Ratio': simulation_results[2], 'Max Drawdown': simulation_results[3]})
     fig = px.scatter(simulation_df, x='Volatility', y='Return', color='Sharpe Ratio', title='Monte Carlo Simulation Results')
     st.plotly_chart(fig)
     
@@ -187,7 +193,9 @@ def main():
     st.write("Generate PDF Report:")
     generate_pdf = st.button("Generate PDF")
     if generate_pdf:
-        pdf_buffer = create_pdf_report(tickers, optimized_weights, port_return, port_std, sharpe_ratio, var, es)
+        cvar = es  # Conditional VaR is the same as ES in this context
+        max_drawdown = simulation_results[3].max()
+        pdf_buffer = create_pdf_report(tickers, optimized_weights, port_return, port_std, sharpe_ratio, var, es, cvar, max_drawdown)
         st.download_button("Download PDF", data=pdf_buffer, file_name="Portfolio_Optimization_Report.pdf", mime='application/pdf')
 
 if __name__ == "__main__":
