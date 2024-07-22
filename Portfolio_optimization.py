@@ -7,7 +7,6 @@ import seaborn as sns
 import plotly.express as px
 from scipy.optimize import minimize
 from fpdf import FPDF
-from joblib import Parallel, delayed
 
 def calculate_var(returns, alpha=0.05):
     if len(returns) == 0:
@@ -26,7 +25,7 @@ def monte_carlo_simulation(mean_returns, cov_matrix, num_simulations, num_assets
     np.random.seed(42)
     results = np.zeros((4, num_simulations))
 
-    def simulate():
+    for i in range(num_simulations):
         weights = np.random.random(num_assets)
         weights /= np.sum(weights)
 
@@ -34,11 +33,12 @@ def monte_carlo_simulation(mean_returns, cov_matrix, num_simulations, num_assets
         portfolio_stddev = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
         max_drawdown = np.max(np.maximum.accumulate(mean_returns) - mean_returns)
 
-        return [portfolio_return, portfolio_stddev, (portfolio_return - 0.01) / portfolio_stddev, max_drawdown]
+        results[0, i] = portfolio_return
+        results[1, i] = portfolio_stddev
+        results[2, i] = (portfolio_return - 0.01) / portfolio_stddev  # Sharpe Ratio
+        results[3, i] = max_drawdown
 
-    results = Parallel(n_jobs=-1)(delayed(simulate)() for _ in range(num_simulations))
-
-    return np.array(results).T
+    return results
 
 def plot_efficient_frontier(mean_returns, cov_matrix):
     results = monte_carlo_simulation(mean_returns, cov_matrix, 10000, len(mean_returns))
@@ -116,7 +116,9 @@ def main():
     st.title("Portfolio Optimization Tool")
 
     tickers = st.text_input("Enter ticker symbols separated by commas (e.g., AAPL,MSFT,GOOGL,AMZN,TSLA):", "AAPL,MSFT,GOOGL,AMZN,TSLA").split(',')
-    data = yf.download(tickers, start="2020-01-01")['Adj Close']
+    
+    # Disable yfinance progress bar
+    data = yf.download(tickers, start="2020-01-01", progress=False)['Adj Close']
     
     if data.isnull().values.any():
         st.write("Data contains null values. Attempting to fill missing data.")
