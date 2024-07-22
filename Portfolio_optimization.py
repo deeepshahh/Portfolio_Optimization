@@ -8,14 +8,26 @@ import plotly.express as px
 from scipy.optimize import minimize
 from fpdf import FPDF
 
+# Exchange rate mapping based on stock suffix
+exchange_rate_mapping = {
+    'NS': 'USDINR=X',
+    'L': 'GBPUSD=X',
+    'TO': 'CADUSD=X',
+    'HK': 'HKDUSD=X',
+    # Add more mappings as needed
+}
+
 # Function to retrieve exchange rate data
-def get_exchange_rate():
+def get_exchange_rate(ticker_suffix):
+    if ticker_suffix not in exchange_rate_mapping:
+        return 1  # Assume 1 for USD stocks
     try:
-        fx_data = yf.download('USDINR=X', start="2020-01-01")
+        fx_ticker = exchange_rate_mapping[ticker_suffix]
+        fx_data = yf.download(fx_ticker, start="2020-01-01")
         fx_data = fx_data['Adj Close'].ffill().bfill()
         return fx_data
     except Exception as e:
-        st.write("Error retrieving exchange rate data:", e)
+        st.write("Error retrieving exchange rate data for", ticker_suffix, ":", e)
         return None
 
 def calculate_var(returns, alpha=0.05):
@@ -132,12 +144,13 @@ def main():
             st.write("Data still contains null values. Please check the ticker symbols and try again.")
             return
     
-    # Retrieve exchange rate data
-    exchange_rate = get_exchange_rate()
-    if exchange_rate is None:
-        st.write("Unable to retrieve exchange rate data. Proceeding without currency adjustment.")
-    else:
-        data['HDFCBANK.NS'] = data['HDFCBANK.NS'].div(exchange_rate, axis=0)
+    # Adjust data for each ticker based on its exchange rate
+    for ticker in tickers:
+        suffix = ticker.split('.')[-1] if '.' in ticker else ''
+        if suffix:
+            exchange_rate = get_exchange_rate(suffix)
+            if exchange_rate is not None:
+                data[ticker] = data[ticker].div(exchange_rate, axis=0)
     
     mean_returns = data.pct_change().mean()
     cov_matrix = data.pct_change().cov()
@@ -173,14 +186,22 @@ def main():
     st.write("Covariance Matrix:")
     plt.figure(figsize=(10, 7))
     sns.heatmap(cov_matrix, annot=True, cmap='coolwarm', xticklabels=tickers, yticklabels=tickers)
-    st.pyplot(plt)
+    st.pyplot(plt.gcf())
     
-    # Historical closing prices
-    st.write("Historical Adjusted Closing Prices:")
-    st.line_chart(data)
+    # Efficient Frontier plot
+    st.write("Efficient Frontier:")
+    plot_efficient_frontier(mean_returns, cov_matrix)
     
-    # Portfolio weights pie chart
-    st.write("Portfolio Weights Distribution:")
+    # Plotting the adjusted stock prices
+    st.write("Adjusted Stock Prices:")
+    fig, ax = plt.subplots(figsize=(12, 8))
+    for column in data.columns:
+        ax.plot(data[column], label=column)
+    ax.legend()
+    st.pyplot(fig)
+    
+    # Pie chart of optimized weights
+    st.write("Portfolio Allocation:")
     fig, ax = plt.subplots()
     ax.pie(optimized_weights, labels=tickers, autopct='%1.1f%%', startangle=90)
     ax.axis('equal')
