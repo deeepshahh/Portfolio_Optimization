@@ -150,7 +150,13 @@ def main():
         if suffix:
             exchange_rate = get_exchange_rate(suffix)
             if exchange_rate is not None:
+                if len(exchange_rate) != len(data[ticker]):
+                    st.write(f"Exchange rate length mismatch for {ticker}. Adjusting...")
+                    exchange_rate = exchange_rate.reindex(data[ticker].index, method='ffill').ffill().bfill()
+                st.write(f"Adjusting {ticker} prices based on exchange rate.")
                 data[ticker] = data[ticker].div(exchange_rate, axis=0)
+            else:
+                st.write(f"Exchange rate for {ticker} not found. Skipping adjustment.")
     
     mean_returns = data.pct_change().mean()
     cov_matrix = data.pct_change().cov()
@@ -182,10 +188,6 @@ def main():
     st.write(f"Annual Volatility (Standard Deviation): {port_std:.2%}")
     st.write(f"Sharpe Ratio: {sharpe_ratio:.2f}")
     
-    # Covariance matrix heatmap
-    st.write("Covariance Matrix:")
-    plt.figure(figsize=(10, 7))
-    sns.heatmap(cov_matrix, annot=True, cmap='coolwarm', xticklabels=tickers, yticklabels=tickers)
     st.pyplot(plt.gcf())
     
     # Efficient Frontier plot
