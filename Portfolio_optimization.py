@@ -5,8 +5,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.express as px
+import plotly.graph_objs as go
 from scipy.optimize import minimize
 from fpdf import FPDF
+from io import BytesIO
+import base64
 
 def calculate_var(returns, alpha=0.05):
     if len(returns) == 0:
@@ -21,297 +24,141 @@ def calculate_es(returns, alpha=0.05):
     es = returns[returns <= var].mean()
     return es
 
-def monte_carlo_simulation(mean_returns, cov_matrix, num_simulations):
+def monte_carlo_simulation(mean_returns, cov_matrix, num_simulations, num_days):
     np.random.seed(42)
     num_assets = len(mean_returns)
-    results = np.zeros((3, num_simulations))
+    results = np.zeros((num_simulations, num_days))
 
     for i in range(num_simulations):
         weights = np.random.random(num_assets)
         weights /= np.sum(weights)
 
-        portfolio_return = np.sum(mean_returns * weights)
-        portfolio_stddev = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
-
-        results[0, i] = portfolio_return
-        results[1, i] = portfolio_stddev
-        results[2, i] = (portfolio_return - 0.01) / portfolio_stddev  # Sharpe Ratio
+        daily_returns = np.random.multivariate_normal(mean_returns, cov_matrix, num_days)
+        portfolio_returns = np.dot(daily_returns, weights)
+        results[i, :] = portfolio_returns
 
     return results
 
-def plot_efficient_frontier(mean_returns, cov_matrix):
-    results = monte_carlo_simulation(mean_returns, cov_matrix, 10000)
-    fig = px.scatter(x=results[1], y=results[0], color=results[2], 
-                     labels={'x': 'Volatility', 'y': 'Return', 'color': 'Sharpe Ratio'},
-                     title='Efficient Frontier')
-    st.plotly_chart(fig)
+def risk_parity_optimization(cov_matrix):
+    def risk_contribution(weights, cov_matrix):
+        portfolio_var = np.dot(weights.T, np.dot(cov_matrix, weights))
+        marginal_contrib = np.dot(cov_matrix, weights)
+        risk_contrib = weights * marginal_contrib / portfolio_var
+        return risk_contrib
 
-def create_pdf_report(tickers, optimized_weights, port_return, port_std, sharpe_ratio, var, es):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
-    
-    pdf.cell(200, 10, txt="Portfolio Optimization Report", ln=True, align='C')
-    
-    pdf.cell(200, 10, txt=f"Tickers: {', '.join(tickers)}", ln=True)
-    pdf.cell(200, 10, txt=f"Weights: {', '.join([f'{w:.2%}' for w in optimized_weights])}", ln=True)
-    
-    pdf.cell(200, 10, txt=f"Expected Annual Return: {port_return:.2%}", ln=True)
-    pdf.cell(200, 10, txt=f"Annual Volatility (Standard Deviation): {port_std:.2%}", ln=True)
-    pdf.cell(200, 10, txt=f"Sharpe Ratio: {sharpe_ratio:.2f}", ln=True)
-    pdf.cell(200, 10, txt=f"Value at Risk (VaR) at 95% confidence level: {var:.2%}", ln=True)
-    pdf.cell(200, 10, txt=f"Expected Shortfall (ES) at 95% confidence level: {es:.2%}", ln=True)
-    
-    pdf_buffer = pdf.output(dest='S').encode('latin1')
-    return pdf_buffer
+    num_assets = len(cov_matrix)
+    constraints = ({'type': 'eq', 'fun': lambda weights: np.sum(weights) - 1})
+    bounds = tuple((0, 1) for asset in range(num_assets))
+    initial_guess = num_assets * [1. / num_assets,]
 
-def optimize_portfolio(mean_returns, cov_matrix, additional_constraints=None):
-    num_assets = len(mean_returns)
-    args = (mean_returns, cov_matrix)
-    constraints = [{'type': 'eq', 'fun': lambda x: np.sum(x) - 1}]
-    bounds = tuple((0, 1) for _ in range(num_assets))
-    
-    if additional_constraints:
-        constraints.extend(additional_constraints)
-    
-    # Add a constraint to ensure no single asset has more than 30% of the portfolio
-    max_allocation_per_asset = 0.3
-    constraints.append({'type': 'ineq', 'fun': lambda weights: max_allocation_per_asset - np.max(weights)})
+    result = minimize(lambda weights: np.sum((risk_contribution(weights, cov_matrix) - 1/num_assets)**2),
+                      initial_guess, method='SLSQP', bounds=bounds, constraints=constraints)
+    return result.x
 
-    # Objective function to maximize return and minimize risk
-    def objective_function(weights, mean_returns, cov_matrix):
-        return -1 * (np.sum(weights * mean_returns) - 0.01) / np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+def get_historical_data(tickers, start, end):
+    data = yf.download(tickers, start=start, end=end)['Adj Close']
+    return data
 
-    result = minimize(
-        objective_function,
-        num_assets * [1. / num_assets,],
-        args=args, method='SLSQP', bounds=bounds, constraints=constraints
-    )
-    return result
+def calculate_annual_returns(data):
+    returns = data.pct_change().mean() * 252
+    return returns
 
-def get_index_stocks(index_name):
-    index_tickers = {
-        "NIFTY 50": ["RELIANCE.NS", "HDFCBANK.NS", "INFY.NS", "HDFC.NS", "ICICIBANK.NS", "TCS.NS", "KOTAKBANK.NS", "ITC.NS", "LT.NS", "SBIN.NS", "BHARTIARTL.NS", "ASIANPAINT.NS", "HINDUNILVR.NS", "AXISBANK.NS", "HCLTECH.NS", "BAJFINANCE.NS", "M&M.NS", "MARUTI.NS", "ULTRACEMCO.NS", "SUNPHARMA.NS"],
-        "S&P 500": ["AAPL", "MSFT", "GOOGL", "AMZN", "FB", "BRK-B", "JNJ", "NVDA", "V", "PG", "UNH", "DIS", "PYPL", "MA", "HD", "NFLX", "VZ", "ADBE", "INTC", "CMCSA"]
-    }
-    return index_tickers.get(index_name, [])
+def calculate_annual_covariance(data):
+    cov_matrix = data.pct_change().cov() * 252
+    return cov_matrix
+
+def mean_variance_optimization(returns, cov_matrix):
+    def portfolio_performance(weights, returns, cov_matrix):
+        portfolio_return = np.sum(weights * returns)
+        portfolio_volatility = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+        return portfolio_return, portfolio_volatility
+
+    def negative_sharpe_ratio(weights, returns, cov_matrix, risk_free_rate=0.01):
+        portfolio_return, portfolio_volatility = portfolio_performance(weights, returns, cov_matrix)
+        return - (portfolio_return - risk_free_rate) / portfolio_volatility
+
+    num_assets = len(returns)
+    constraints = ({'type': 'eq', 'fun': lambda weights: np.sum(weights) - 1})
+    bounds = tuple((0, 1) for asset in range(num_assets))
+    initial_guess = num_assets * [1. / num_assets,]
+
+    result = minimize(negative_sharpe_ratio, initial_guess, args=(returns, cov_matrix), method='SLSQP', bounds=bounds, constraints=constraints)
+    return result.x
+
+def plot_portfolio(data, weights):
+    portfolio = np.dot(data, weights)
+    fig, ax = plt.subplots()
+    ax.plot(portfolio, label='Optimized Portfolio')
+    ax.legend()
+    return fig
+
+def plot_interactive_portfolio(data, weights):
+    portfolio = np.dot(data, weights)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=data.index, y=portfolio, mode='lines', name='Optimized Portfolio'))
+    return fig
+
+def download_pdf(fig):
+    buffer = BytesIO()
+    fig.savefig(buffer, format='pdf')
+    buffer.seek(0)
+    b64 = base64.b64encode(buffer.read()).decode()
+    href = f'<a href="data:application/pdf;base64,{b64}" download="portfolio_optimization.pdf">Download PDF Report</a>'
+    return href
 
 def main():
-    st.title("Portfolio Optimizer")
+    st.title("Portfolio Optimization Tool")
 
-    portfolio_type = st.selectbox("Choose Portfolio Type", ["Multi-Asset Portfolio", "Equity Portfolio"])
+    st.sidebar.header("User Input Parameters")
 
-    if portfolio_type == "Multi-Asset Portfolio":
-        asset_classes = st.multiselect("Choose Asset Classes", ["Equity", "Commodities", "Currency", "Debt Market"])
-        
-        assets = {}
-        if "Equity" in asset_classes:
-            equity_choices = st.multiselect("Choose Equity Tickers", ["RELIANCE.NS", "HDFCBANK.NS", "INFY.NS", "TCS.NS"])
-            assets["Equity"] = equity_choices
-        if "Commodities" in asset_classes:
-            commodities_choices = st.multiselect("Choose Commodities Tickers", ["GOLD", "SILVER"])
-            assets["Commodities"] = commodities_choices
-        if "Currency" in asset_classes:
-            currency_choices = st.multiselect("Choose Currency Pairs", ["USDINR=X", "EURINR=X"])
-            assets["Currency"] = currency_choices
-        if "Debt Market" in asset_classes:
-            debt_choices = st.multiselect("Choose Debt Tickers", ["GOVT.NS", "CORPBONDS.NS"])
-            assets["Debt Market"] = debt_choices
-        
-        investment_amount = st.number_input("Enter the investment amount (in INR):", min_value=0.0, value=100000.0)
-        investment_date = st.date_input("Enter the investment date:", value=pd.to_datetime("2020-01-01"))
+    portfolio_type = st.sidebar.selectbox("Select Portfolio Type", ["Multi-Asset Portfolio", "Equity Portfolio"])
 
-        all_tickers = sum(assets.values(), [])
-        data = yf.download(all_tickers, start=investment_date)['Adj Close']
+    tickers = st.sidebar.text_area("Enter tickers separated by commas")
+    tickers = [ticker.strip() for ticker in tickers.split(",")]
 
-        if data.isnull().values.any():
-            st.write("Data contains null values. Attempting to fill missing data.")
-            data = data.fillna(method='ffill').fillna(method='bfill')
-        
-        if data.isnull().values.any():
-            st.write("Data still contains null values. Please check the ticker symbols and try again.")
-            return
+    start_date = st.sidebar.date_input("Start Date", value=pd.to_datetime("2020-01-01"))
+    end_date = st.sidebar.date_input("End Date", value=pd.to_datetime("2023-01-01"))
 
-        mean_returns = data.pct_change().mean()
-        cov_matrix = data.pct_change().cov()
+    num_simulations = st.sidebar.number_input("Number of Simulations", min_value=100, max_value=10000, value=1000)
+    num_days = st.sidebar.number_input("Number of Days for Monte Carlo Simulation", min_value=1, max_value=252, value=252)
 
-        result = optimize_portfolio(mean_returns, cov_matrix)
-        
-        if not result.success:
-            st.write("Optimization failed. Please check your inputs and try again.")
-            return
-        
-        optimized_weights = result.x
-        st.write("Optimized Portfolio Weights:")
-        weights_df = pd.DataFrame({'Ticker': all_tickers, 'Weight': optimized_weights})
-        st.write(weights_df)
-        
-        st.write("Portfolio Performance:")
-        port_return, port_std = np.sum(mean_returns * optimized_weights), np.sqrt(np.dot(optimized_weights.T, np.dot(cov_matrix, optimized_weights)))
-        sharpe_ratio = (port_return - 0.01) / port_std
-        st.write(f"Expected Annual Return: {port_return:.2%}")
-        st.write(f"Annual Volatility (Standard Deviation): {port_std:.2%}")
-        st.write(f"Sharpe Ratio: {sharpe_ratio:.2f}")
-        
-        st.write("Historical Adjusted Closing Prices:")
-        st.line_chart(data)
-        
-        st.write("Portfolio Weights Distribution:")
-        fig, ax = plt.subplots()
-        ax.pie(optimized_weights, labels=all_tickers, autopct='%1.1f%%', startangle=90)
-        ax.axis('equal')
-        st.pyplot(fig)
-        
-        # Covariance matrix heatmap
-        st.write("Covariance Matrix:")
-        plt.figure(figsize=(10, 7))
-        sns.heatmap(cov_matrix, annot=True, cmap='coolwarm', xticklabels=all_tickers, yticklabels=all_tickers)
-        st.pyplot(plt)
-        
-        plot_efficient_frontier(mean_returns, cov_matrix)
-        
-        # Calculate VaR and ES for the optimized portfolio
-        portfolio_returns = data.pct_change().dot(optimized_weights)
-        var_95 = calculate_var(portfolio_returns, alpha=0.05)
-        es_95 = calculate_es(portfolio_returns, alpha=0.05)
-        st.write(f"Value at Risk (VaR) at 95% confidence level: {var_95:.2%}")
-        st.write(f"Expected Shortfall (ES) at 95% confidence level: {es_95:.2%}")
-        
-        # Create PDF report
-        pdf_buffer = create_pdf_report(all_tickers, optimized_weights, port_return, port_std, sharpe_ratio, var_95, es_95)
-        st.download_button(label="Download Report", data=pdf_buffer, file_name="Portfolio_Optimization_Report.pdf", mime="application/pdf")
-    
-    elif portfolio_type == "Equity Portfolio":
-        equity_type = st.selectbox("Choose Equity Type", ["Chosen Stocks", "Indexes"])
-        
-        if equity_type == "Chosen Stocks":
-            tickers = st.text_input("Enter ticker symbols separated by commas (e.g., HDFCBANK.NS,RELIANCE.NS,TCS.NS):", "HDFCBANK.NS,RELIANCE.NS,TCS.NS").split(',')
-            investment_amount = st.number_input("Enter the investment amount (in INR):", min_value=0.0, value=100000.0)
-            investment_date = st.date_input("Enter the investment date:", value=pd.to_datetime("2020-01-01"))
+    if st.sidebar.button("Optimize Portfolio"):
+        data = get_historical_data(tickers, start=start_date, end=end_date)
+        returns = calculate_annual_returns(data)
+        cov_matrix = calculate_annual_covariance(data)
 
-            data = yf.download(tickers, start=investment_date)['Adj Close']
+        st.subheader("Optimized Portfolio Weights (Mean-Variance Optimization)")
+        mv_weights = mean_variance_optimization(returns, cov_matrix)
+        st.write(dict(zip(tickers, mv_weights)))
 
-            if data.isnull().values.any():
-                st.write("Data contains null values. Attempting to fill missing data.")
-                data = data.fillna(method='ffill').fillna(method='bfill')
-            
-            if data.isnull().values.any():
-                st.write("Data still contains null values. Please check the ticker symbols and try again.")
-                return
+        st.subheader("Optimized Portfolio Weights (Risk Parity)")
+        rp_weights = risk_parity_optimization(cov_matrix)
+        st.write(dict(zip(tickers, rp_weights)))
 
-            mean_returns = data.pct_change().mean()
-            cov_matrix = data.pct_change().cov()
+        mv_fig = plot_portfolio(data, mv_weights)
+        st.pyplot(mv_fig)
+        rp_fig = plot_portfolio(data, rp_weights)
+        st.pyplot(rp_fig)
 
-            result = optimize_portfolio(mean_returns, cov_matrix)
-            
-            if not result.success:
-                st.write("Optimization failed. Please check your inputs and try again.")
-                return
-            
-            optimized_weights = result.x
-            st.write("Optimized Portfolio Weights:")
-            weights_df = pd.DataFrame({'Ticker': tickers, 'Weight': optimized_weights})
-            st.write(weights_df)
-            
-            st.write("Portfolio Performance:")
-            port_return, port_std = np.sum(mean_returns * optimized_weights), np.sqrt(np.dot(optimized_weights.T, np.dot(cov_matrix, optimized_weights)))
-            sharpe_ratio = (port_return - 0.01) / port_std
-            st.write(f"Expected Annual Return: {port_return:.2%}")
-            st.write(f"Annual Volatility (Standard Deviation): {port_std:.2%}")
-            st.write(f"Sharpe Ratio: {sharpe_ratio:.2f}")
-            
-            st.write("Historical Adjusted Closing Prices:")
-            st.line_chart(data)
-            
-            st.write("Portfolio Weights Distribution:")
-            fig, ax = plt.subplots()
-            ax.pie(optimized_weights, labels=tickers, autopct='%1.1f%%', startangle=90)
-            ax.axis('equal')
-            st.pyplot(fig)
-            
-            # Covariance matrix heatmap
-            st.write("Covariance Matrix:")
-            plt.figure(figsize=(10, 7))
-            sns.heatmap(cov_matrix, annot=True, cmap='coolwarm', xticklabels=tickers, yticklabels=tickers)
-            st.pyplot(plt)
-            
-            plot_efficient_frontier(mean_returns, cov_matrix)
-            
-            # Calculate VaR and ES for the optimized portfolio
-            portfolio_returns = data.pct_change().dot(optimized_weights)
-            var_95 = calculate_var(portfolio_returns, alpha=0.05)
-            es_95 = calculate_es(portfolio_returns, alpha=0.05)
-            st.write(f"Value at Risk (VaR) at 95% confidence level: {var_95:.2%}")
-            st.write(f"Expected Shortfall (ES) at 95% confidence level: {es_95:.2%}")
-            
-            # Create PDF report
-            pdf_buffer = create_pdf_report(tickers, optimized_weights, port_return, port_std, sharpe_ratio, var_95, es_95)
-            st.download_button(label="Download Report", data=pdf_buffer, file_name="Portfolio_Optimization_Report.pdf", mime="application/pdf")
+        monte_carlo_results = monte_carlo_simulation(returns, cov_matrix, num_simulations, num_days)
+        mc_fig = plt.figure(figsize=(10, 6))
+        plt.plot(np.mean(monte_carlo_results, axis=0))
+        plt.title("Monte Carlo Simulation")
+        plt.xlabel("Days")
+        plt.ylabel("Portfolio Value")
+        st.pyplot(mc_fig)
 
-        elif equity_type == "Indexes":
-            index_choices = st.selectbox("Choose an Index", ["NIFTY 50", "S&P 500"])
-            tickers = get_index_stocks(index_choices)
-            investment_amount = st.number_input("Enter the investment amount (in INR):", min_value=0.0, value=100000.0)
-            investment_date = st.date_input("Enter the investment date:", value=pd.to_datetime("2020-01-01"))
+        mv_interactive_fig = plot_interactive_portfolio(data, mv_weights)
+        st.plotly_chart(mv_interactive_fig)
+        rp_interactive_fig = plot_interactive_portfolio(data, rp_weights)
+        st.plotly_chart(rp_interactive_fig)
 
-            data = yf.download(tickers, start=investment_date)['Adj Close']
-
-            if data.isnull().values.any():
-                st.write("Data contains null values. Attempting to fill missing data.")
-                data = data.fillna(method='ffill').fillna(method='bfill')
-            
-            if data.isnull().values.any():
-                st.write("Data still contains null values. Please check the ticker symbols and try again.")
-                return
-
-            mean_returns = data.pct_change().mean()
-            cov_matrix = data.pct_change().cov()
-
-            result = optimize_portfolio(mean_returns, cov_matrix)
-            
-            if not result.success:
-                st.write("Optimization failed. Please check your inputs and try again.")
-                return
-            
-            optimized_weights = result.x
-            st.write("Optimized Portfolio Weights:")
-            weights_df = pd.DataFrame({'Ticker': tickers, 'Weight': optimized_weights})
-            st.write(weights_df)
-            
-            st.write("Portfolio Performance:")
-            port_return, port_std = np.sum(mean_returns * optimized_weights), np.sqrt(np.dot(optimized_weights.T, np.dot(cov_matrix, optimized_weights)))
-            sharpe_ratio = (port_return - 0.01) / port_std
-            st.write(f"Expected Annual Return: {port_return:.2%}")
-            st.write(f"Annual Volatility (Standard Deviation): {port_std:.2%}")
-            st.write(f"Sharpe Ratio: {sharpe_ratio:.2f}")
-            
-            st.write("Historical Adjusted Closing Prices:")
-            st.line_chart(data)
-            
-            st.write("Portfolio Weights Distribution:")
-            fig, ax = plt.subplots()
-            ax.pie(optimized_weights, labels=tickers, autopct='%1.1f%%', startangle=90)
-            ax.axis('equal')
-            st.pyplot(fig)
-            
-            # Covariance matrix heatmap
-            st.write("Covariance Matrix:")
-            plt.figure(figsize=(10, 7))
-            sns.heatmap(cov_matrix, annot=True, cmap='coolwarm', xticklabels=tickers, yticklabels=tickers)
-            st.pyplot(plt)
-            
-            plot_efficient_frontier(mean_returns, cov_matrix)
-            
-            # Calculate VaR and ES for the optimized portfolio
-            portfolio_returns = data.pct_change().dot(optimized_weights)
-            var_95 = calculate_var(portfolio_returns, alpha=0.05)
-            es_95 = calculate_es(portfolio_returns, alpha=0.05)
-            st.write(f"Value at Risk (VaR) at 95% confidence level: {var_95:.2%}")
-            st.write(f"Expected Shortfall (ES) at 95% confidence level: {es_95:.2%}")
-            
-            # Create PDF report
-            pdf_buffer = create_pdf_report(tickers, optimized_weights, port_return, port_std, sharpe_ratio, var_95, es_95)
-            st.download_button(label="Download Report", data=pdf_buffer, file_name="Portfolio_Optimization_Report.pdf", mime="application/pdf")
+        mv_pdf_href = download_pdf(mv_fig)
+        st.markdown(mv_pdf_href, unsafe_allow_html=True)
+        rp_pdf_href = download_pdf(rp_fig)
+        st.markdown(rp_pdf_href, unsafe_allow_html=True)
+        mc_pdf_href = download_pdf(mc_fig)
+        st.markdown(mc_pdf_href, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
