@@ -11,6 +11,7 @@ from fpdf import FPDF
 from io import BytesIO
 import base64
 
+# Risk and Monte Carlo Simulation functions
 def calculate_var(returns, alpha=0.05):
     if len(returns) == 0:
         return np.nan
@@ -39,6 +40,7 @@ def monte_carlo_simulation(mean_returns, cov_matrix, num_simulations, num_days):
 
     return results
 
+# Risk Parity Optimization
 def risk_parity_optimization(cov_matrix):
     def risk_contribution(weights, cov_matrix):
         portfolio_var = np.dot(weights.T, np.dot(cov_matrix, weights))
@@ -55,6 +57,7 @@ def risk_parity_optimization(cov_matrix):
                       initial_guess, method='SLSQP', bounds=bounds, constraints=constraints)
     return result.x
 
+# Data Retrieval and Processing
 def get_historical_data(tickers, start, end):
     data = yf.download(tickers, start=start, end=end)['Adj Close']
     return data
@@ -67,6 +70,7 @@ def calculate_annual_covariance(data):
     cov_matrix = data.pct_change().cov() * 252
     return cov_matrix
 
+# Mean-Variance Optimization
 def mean_variance_optimization(returns, cov_matrix):
     def portfolio_performance(weights, returns, cov_matrix):
         portfolio_return = np.sum(weights * returns)
@@ -85,6 +89,7 @@ def mean_variance_optimization(returns, cov_matrix):
     result = minimize(negative_sharpe_ratio, initial_guess, args=(returns, cov_matrix), method='SLSQP', bounds=bounds, constraints=constraints)
     return result.x
 
+# Plotting functions
 def plot_portfolio(data, weights):
     portfolio = np.dot(data, weights)
     fig, ax = plt.subplots()
@@ -98,6 +103,7 @@ def plot_interactive_portfolio(data, weights):
     fig.add_trace(go.Scatter(x=data.index, y=portfolio, mode='lines', name='Optimized Portfolio'))
     return fig
 
+# Download PDF function
 def download_pdf(fig):
     buffer = BytesIO()
     fig.savefig(buffer, format='pdf')
@@ -106,6 +112,7 @@ def download_pdf(fig):
     href = f'<a href="data:application/pdf;base64,{b64}" download="portfolio_optimization.pdf">Download PDF Report</a>'
     return href
 
+# Main Streamlit app
 def main():
     st.title("Portfolio Optimization Tool")
 
