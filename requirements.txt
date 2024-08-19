@@ -1,9 +1,7 @@
-yfinance
-streamlit
-pandas
-numpy
-matplotlib
-seaborn
-plotly
-scipy
-fpdf
+yfinance==0.2.30        # For fetching historical price data
+numpy==1.24.2           # For numerical operations, including log returns
+pandas==2.1.1           # For data manipulation and analysis
+matplotlib==3.8.0       # For data visualization (plots)
+seaborn==0.12.2         # For enhanced data visualization (correlation heatmap)
+pypfopt==1.5.6          # For portfolio optimization, including Efficient Frontier, covariance shrinkage, etc.
+scipy==1.11.1           # For statistical functions, used in some advanced risk metrics
