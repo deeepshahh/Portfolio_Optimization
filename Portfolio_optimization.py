@@ -1,171 +1,117 @@
 import yfinance as yf
-import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import plotly.express as px
-import plotly.graph_objs as go
-from scipy.optimize import minimize
-from fpdf import FPDF
-from io import BytesIO
-import base64
+from pypfopt import EfficientFrontier, risk_models, expected_returns, objective_functions
+from pypfopt.discrete_allocation import DiscreteAllocation, get_latest_prices
+from pypfopt.risk_models import CovarianceShrinkage
+from pypfopt.expected_returns import capm_return
+from scipy.stats import norm
 
-# Risk and Monte Carlo Simulation functions
-def calculate_var(returns, alpha=0.05):
-    if len(returns) == 0:
-        return np.nan
-    var = np.percentile(returns, 100 * alpha)
-    return var
-
-def calculate_es(returns, alpha=0.05):
-    if len(returns) == 0:
-        return np.nan
-    var = calculate_var(returns, alpha)
-    es = returns[returns <= var].mean()
-    return es
-
-def monte_carlo_simulation(mean_returns, cov_matrix, num_simulations, num_days):
-    np.random.seed(42)
-    num_assets = len(mean_returns)
-    results = np.zeros((num_simulations, num_days))
-
-    for i in range(num_simulations):
-        weights = np.random.random(num_assets)
-        weights /= np.sum(weights)
-
-        daily_returns = np.random.multivariate_normal(mean_returns, cov_matrix, num_days)
-        portfolio_returns = np.dot(daily_returns, weights)
-        results[i, :] = portfolio_returns
-
-    return results
-
-# Risk Parity Optimization
-def risk_parity_optimization(cov_matrix):
-    def risk_contribution(weights, cov_matrix):
-        portfolio_var = np.dot(weights.T, np.dot(cov_matrix, weights))
-        marginal_contrib = np.dot(cov_matrix, weights)
-        risk_contrib = weights * marginal_contrib / portfolio_var
-        return risk_contrib
-
-    num_assets = len(cov_matrix)
-    constraints = ({'type': 'eq', 'fun': lambda weights: np.sum(weights) - 1})
-    bounds = tuple((0, 1) for asset in range(num_assets))
-    initial_guess = num_assets * [1. / num_assets,]
-
-    result = minimize(lambda weights: np.sum((risk_contribution(weights, cov_matrix) - 1/num_assets)**2),
-                      initial_guess, method='SLSQP', bounds=bounds, constraints=constraints)
-    return result.x
-
-# Data Retrieval and Processing
-def get_historical_data(tickers, start, end):
-    data = yf.download(tickers, start=start, end=end)['Adj Close']
+# 1. Data Collection
+def get_data(tickers, start_date, end_date):
+    print("Fetching data...")
+    data = yf.download(tickers, start=start_date, end=end_date)['Adj Close']
     return data
 
-def calculate_annual_returns(data):
-    returns = data.pct_change().mean() * 252
-    return returns
+# 2. Calculate Log Returns
+def calculate_log_returns(data):
+    log_returns = np.log(data / data.shift(1)).dropna()
+    return log_returns
 
-def calculate_annual_covariance(data):
-    cov_matrix = data.pct_change().cov() * 252
-    return cov_matrix
+# 3. Covariance Matrix Shrinkage
+def calculate_shrinked_covariance(log_returns):
+    print("Calculating shrinked covariance matrix...")
+    S = CovarianceShrinkage(log_returns).ledoit_wolf()
+    return S
 
-# Mean-Variance Optimization
-def mean_variance_optimization(returns, cov_matrix):
-    def portfolio_performance(weights, returns, cov_matrix):
-        portfolio_return = np.sum(weights * returns)
-        portfolio_volatility = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
-        return portfolio_return, portfolio_volatility
+# 4. Portfolio Optimization with Regularization (L2)
+def portfolio_optimization(log_returns, S, l2_reg=0.01, target_return=None):
+    mu = expected_returns.mean_historical_return(log_returns)
+    
+    ef = EfficientFrontier(mu, S)
+    ef.add_objective(objective_functions.L2_reg, gamma=l2_reg)
+    
+    if target_return:
+        ef.efficient_return(target_return=target_return)
+    else:
+        ef.max_sharpe()
+    
+    weights = ef.clean_weights()
+    performance = ef.portfolio_performance(verbose=True)
+    
+    return weights, performance, ef
 
-    def negative_sharpe_ratio(weights, returns, cov_matrix, risk_free_rate=0.01):
-        portfolio_return, portfolio_volatility = portfolio_performance(weights, returns, cov_matrix)
-        return - (portfolio_return - risk_free_rate) / portfolio_volatility
+# 5. Calculate Advanced Risk Metrics
+def calculate_risk_metrics(log_returns, weights):
+    portfolio_returns = log_returns.dot(weights)
+    VaR_95 = np.percentile(portfolio_returns, 5)
+    CVaR_95 = portfolio_returns[portfolio_returns <= VaR_95].mean()
+    annualized_volatility = np.std(portfolio_returns) * np.sqrt(252)
+    max_drawdown = (portfolio_returns.cumsum().apply(np.exp).cummax() - portfolio_returns.cumsum().apply(np.exp)).max()
+    sortino_ratio = portfolio_returns.mean() / np.sqrt(np.mean(np.minimum(0, portfolio_returns)**2)) * np.sqrt(252)
+    
+    return {
+        "Value at Risk (95%)": VaR_95,
+        "Conditional VaR (95%)": CVaR_95,
+        "Annualized Volatility": annualized_volatility,
+        "Max Drawdown": max_drawdown,
+        "Sortino Ratio": sortino_ratio
+    }
 
-    num_assets = len(returns)
-    constraints = ({'type': 'eq', 'fun': lambda weights: np.sum(weights) - 1})
-    bounds = tuple((0, 1) for asset in range(num_assets))
-    initial_guess = num_assets * [1. / num_assets,]
+# 6. Plot Risk Metrics Over Time
+def plot_rolling_metrics(log_returns, weights):
+    portfolio_returns = log_returns.dot(weights)
+    rolling_volatility = portfolio_returns.rolling(window=252).std() * np.sqrt(252)
+    rolling_sharpe = portfolio_returns.rolling(window=252).mean() / portfolio_returns.rolling(window=252).std() * np.sqrt(252)
+    
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+    
+    ax1.plot(rolling_volatility)
+    ax1.set_title('Rolling Volatility (Annualized)')
+    ax1.set_ylabel('Volatility')
+    
+    ax2.plot(rolling_sharpe)
+    ax2.set_title('Rolling Sharpe Ratio')
+    ax2.set_ylabel('Sharpe Ratio')
+    
+    plt.tight_layout()
+    plt.show()
 
-    result = minimize(negative_sharpe_ratio, initial_guess, args=(returns, cov_matrix), method='SLSQP', bounds=bounds, constraints=constraints)
-    return result.x
+# 7. Drawdown Chart
+def plot_drawdown(portfolio_returns):
+    cumulative_returns = portfolio_returns.cumsum().apply(np.exp)
+    running_max = cumulative_returns.cummax()
+    drawdown = (running_max - cumulative_returns) / running_max
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(drawdown)
+    plt.title('Drawdown from Peak')
+    plt.ylabel('Drawdown')
+    plt.xlabel('Date')
+    plt.show()
 
-# Plotting functions
-def plot_portfolio(data, weights):
-    portfolio = np.dot(data, weights)
-    fig, ax = plt.subplots()
-    ax.plot(portfolio, label='Optimized Portfolio')
-    ax.legend()
-    return fig
-
-def plot_interactive_portfolio(data, weights):
-    portfolio = np.dot(data, weights)
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=data.index, y=portfolio, mode='lines', name='Optimized Portfolio'))
-    return fig
-
-# Download PDF function
-def download_pdf(fig):
-    buffer = BytesIO()
-    fig.savefig(buffer, format='pdf')
-    buffer.seek(0)
-    b64 = base64.b64encode(buffer.read()).decode()
-    href = f'<a href="data:application/pdf;base64,{b64}" download="portfolio_optimization.pdf">Download PDF Report</a>'
-    return href
-
-# Main Streamlit app
+# Main Execution
 def main():
-    st.title("Portfolio Optimization Tool")
-
-    st.sidebar.header("User Input Parameters")
-
-    portfolio_type = st.sidebar.selectbox("Select Portfolio Type", ["Multi-Asset Portfolio", "Equity Portfolio"])
-
-    tickers = st.sidebar.text_area("Enter tickers separated by commas")
-    tickers = [ticker.strip() for ticker in tickers.split(",")]
-
-    start_date = st.sidebar.date_input("Start Date", value=pd.to_datetime("2020-01-01"))
-    end_date = st.sidebar.date_input("End Date", value=pd.to_datetime("2023-01-01"))
-
-    num_simulations = st.sidebar.number_input("Number of Simulations", min_value=100, max_value=10000, value=1000)
-    num_days = st.sidebar.number_input("Number of Days for Monte Carlo Simulation", min_value=1, max_value=252, value=252)
-
-    if st.sidebar.button("Optimize Portfolio"):
-        data = get_historical_data(tickers, start=start_date, end=end_date)
-        returns = calculate_annual_returns(data)
-        cov_matrix = calculate_annual_covariance(data)
-
-        st.subheader("Optimized Portfolio Weights (Mean-Variance Optimization)")
-        mv_weights = mean_variance_optimization(returns, cov_matrix)
-        st.write(dict(zip(tickers, mv_weights)))
-
-        st.subheader("Optimized Portfolio Weights (Risk Parity)")
-        rp_weights = risk_parity_optimization(cov_matrix)
-        st.write(dict(zip(tickers, rp_weights)))
-
-        mv_fig = plot_portfolio(data, mv_weights)
-        st.pyplot(mv_fig)
-        rp_fig = plot_portfolio(data, rp_weights)
-        st.pyplot(rp_fig)
-
-        monte_carlo_results = monte_carlo_simulation(returns, cov_matrix, num_simulations, num_days)
-        mc_fig = plt.figure(figsize=(10, 6))
-        plt.plot(np.mean(monte_carlo_results, axis=0))
-        plt.title("Monte Carlo Simulation")
-        plt.xlabel("Days")
-        plt.ylabel("Portfolio Value")
-        st.pyplot(mc_fig)
-
-        mv_interactive_fig = plot_interactive_portfolio(data, mv_weights)
-        st.plotly_chart(mv_interactive_fig)
-        rp_interactive_fig = plot_interactive_portfolio(data, rp_weights)
-        st.plotly_chart(rp_interactive_fig)
-
-        mv_pdf_href = download_pdf(mv_fig)
-        st.markdown(mv_pdf_href, unsafe_allow_html=True)
-        rp_pdf_href = download_pdf(rp_fig)
-        st.markdown(rp_pdf_href, unsafe_allow_html=True)
-        mc_pdf_href = download_pdf(mc_fig)
-        st.markdown(mc_pdf_href, unsafe_allow_html=True)
+    tickers = input("Enter the tickers of the assets separated by a comma: ").split(',')
+    start_date = input("Enter the start date (YYYY-MM-DD): ")
+    end_date = input("Enter the end date (YYYY-MM-DD): ")
+    
+    data = get_data(tickers, start_date, end_date)
+    log_returns = calculate_log_returns(data)
+    S = calculate_shrinked_covariance(log_returns)
+    
+    weights, performance, ef = portfolio_optimization(log_returns, S, l2_reg=0.01, target_return=None)
+    
+    print("Optimal Weights: ", weights)
+    print("Portfolio Performance: ", performance)
+    
+    risk_metrics = calculate_risk_metrics(log_returns, np.array(list(weights.values())))
+    print("Advanced Risk Metrics: ", risk_metrics)
+    
+    plot_rolling_metrics(log_returns, np.array(list(weights.values())))
+    plot_drawdown(log_returns.dot(np.array(list(weights.values()))))
 
 if __name__ == "__main__":
     main()
