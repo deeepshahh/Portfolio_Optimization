@@ -1,9 +1,9 @@
-yfinance==0.2.30         # For fetching historical stock data
-numpy==1.24.2            # For numerical operations, including log returns
-pandas==2.1.1            # For data manipulation and analysis
-matplotlib==3.8.0        # For plotting basic visualizations
-seaborn==0.12.2          # For advanced data visualization, such as correlation heatmaps
-plotly==5.16.1           # For interactive plotting, especially the efficient frontier
-scipy==1.11.1            # For optimization and statistical functions
-fpdf==1.7.2              # For generating PDF reports
-streamlit==1.24.0        # For creating the interactive web app interface
+yfinance
+numpy
+pandas
+matplotlib
+seaborn
+plotly
+scipy
+fpdf
+streamlit
