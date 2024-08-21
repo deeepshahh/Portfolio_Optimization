@@ -8,6 +8,9 @@ import streamlit as st
 
 def fetch_data(tickers, start_date, end_date):
     data = yf.download(tickers, start=start_date, end=end_date)['Adj Close']
+    if data.empty:
+        st.error("No data retrieved. Please check the tickers and date range.")
+        st.stop()
     return data
 
 def calculate_var(returns, alpha=0.05):
@@ -49,8 +52,12 @@ def optimize_portfolio(mean_returns, cov_matrix):
     bounds = tuple((0, 1) for _ in range(num_assets))
     initial_guess = num_assets * [1. / num_assets,]
 
-    optimized = minimize(neg_sharpe_ratio, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints)
-    optimal_weights = optimized.x
+    try:
+        optimized = minimize(neg_sharpe_ratio, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints)
+        optimal_weights = optimized.x
+    except ValueError:
+        st.error("Optimization failed due to insufficient data or invalid inputs.")
+        st.stop()
 
     portfolio_return = np.sum(mean_returns * optimal_weights)
     portfolio_stddev = np.sqrt(np.dot(optimal_weights.T, np.dot(cov_matrix, optimal_weights)))
@@ -96,6 +103,11 @@ def run_streamlit_app():
     if st.button("Optimize Portfolio"):
         data = fetch_data(tickers, start_date, end_date)
         log_returns = np.log(data / data.shift(1)).dropna()
+        
+        if log_returns.empty:
+            st.error("Log returns could not be calculated. Please adjust the date range or ticker symbols.")
+            st.stop()
+        
         mean_returns = log_returns.mean()
         cov_matrix = log_returns.cov()
         
