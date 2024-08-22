@@ -8,10 +8,10 @@ import streamlit as st
 
 def fetch_data(tickers, start_date, end_date):
     data = yf.download(tickers, start=start_date, end=end_date)['Adj Close']
-    if data.empty:
-        st.error("No data retrieved. Please check the tickers and date range.")
+    if data.empty or data.isna().sum().sum() > 0:
+        st.error("No data retrieved or data contains missing values. Please check the tickers and date range.")
         st.stop()
-    return data
+    return data.dropna()
 
 def calculate_var(returns, alpha=0.05):
     var = np.percentile(returns, 100 * alpha)
@@ -49,7 +49,7 @@ def optimize_portfolio(mean_returns, cov_matrix):
         return - (portfolio_return - 0.01) / portfolio_stddev
 
     constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
-    bounds = tuple((0, 1) for _ in range(num_assets))
+    bounds = tuple((0.01, 1) for _ in range(num_assets))
     initial_guess = num_assets * [1. / num_assets,]
 
     try:
@@ -74,7 +74,9 @@ def plot_efficient_frontier(mean_returns, cov_matrix):
     results = monte_carlo_simulation(mean_returns, cov_matrix, 10000)
     fig = px.scatter(x=results[1], y=results[0], color=results[2], 
                      labels={'x': 'Volatility', 'y': 'Return', 'color': 'Sharpe Ratio'},
-                     title='Efficient Frontier')
+                     title='Efficient Frontier',
+                     color_continuous_scale=px.colors.sequential.Bluered)
+    fig.update_layout(showlegend=True)
     st.plotly_chart(fig)
 
 def create_pdf_report(tickers, optimized_weights, port_return, port_std, sharpe_ratio, var, es):
@@ -116,12 +118,12 @@ def run_streamlit_app():
         var = calculate_var(log_returns.mean(axis=1))
         es = calculate_es(log_returns.mean(axis=1))
         
-        st.write("Optimal Weights:", optimal_portfolio['weights'])
-        st.write("Expected Return:", optimal_portfolio['return'])
-        st.write("Volatility:", optimal_portfolio['volatility'])
-        st.write("Sharpe Ratio:", optimal_portfolio['sharpe_ratio'])
-        st.write("Value at Risk (VaR):", var)
-        st.write("Expected Shortfall (ES):", es)
+        st.write("Optimal Weights:", pd.DataFrame(optimal_portfolio['weights'], index=tickers, columns=["Weights"]))
+        st.write(f"Expected Return: {optimal_portfolio['return']:.4%}")
+        st.write(f"Volatility: {optimal_portfolio['volatility']:.4%}")
+        st.write(f"Sharpe Ratio: {optimal_portfolio['sharpe_ratio']:.4f}")
+        st.write(f"Value at Risk (VaR): {var:.4%}")
+        st.write(f"Expected Shortfall (ES): {es:.4%}")
         
         plot_efficient_frontier(mean_returns, cov_matrix)
         
